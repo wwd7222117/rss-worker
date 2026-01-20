@@ -26,18 +26,33 @@ let getUser = async (url) => {
 		.transform(res);
 	await rewriter.text();
 	
+	// 临时调试：查看找到的 script 数量
+	console.log('Total scripts found:', scripts.length);
+	console.log('Scripts with __INITIAL_STATE__:', scripts.filter(s => s.includes('__INITIAL_STATE__')).length);
+	
 	// 查找包含 __INITIAL_STATE__ 的 script
 	let script = scripts.find((script) => script.includes('window.__INITIAL_STATE__'));
 	
 	if (!script) {
-		throw new Error('无法找到页面数据，可能是小红书检测到了爬虫请求。请尝试稍后再试或联系开发者。');
+		// 尝试查找其他可能的变量名
+		script = scripts.find((script) => script.includes('__INITIAL_STATE__'));
+		if (script) {
+			console.log('Found __INITIAL_STATE__ without window prefix');
+		}
+	}
+	
+	if (!script) {
+		throw new Error(`无法找到页面数据，可能是小红书检测到了爬虫请求。找到 ${scripts.length} 个 script 标签，但没有包含初始状态数据。`);
 	}
 	
 	// 提取 JSON 部分，支持多种格式
-	let match = script.match(/window\.__INITIAL_STATE__\s*=\s*({[\s\S]*?)(?:<\/script>|$)/);
+	let match = script.match(/(?:window\.)?__INITIAL_STATE__\s*=\s*({[\s\S]*?)(?:<\/script>|$)/);
 	if (!match) {
+		console.log('Script content preview:', script.substring(0, 200));
 		throw new Error('无法解析页面数据格式');
 	}
+	
+	console.log('Successfully extracted JSON, length:', match[1].length);
 	
 	let jsonStr = match[1].trim();
 	// 去掉可能的分号结尾
@@ -59,16 +74,28 @@ let deal = async (ctx) => {
 	const category = 'notes';
 	const url = `https://www.xiaohongshu.com/user/profile/${uid}`;
 
-	const {
-		userPageData: { basicInfo, interactions, tags },
-		notes,
-		collect,
-	} = await getUser(url);
+	const userData = await getUser(url);
+	
+	// 临时调试：查看数据结构（部署后可以删除这部分）
+	console.log('userData keys:', userData ? Object.keys(userData) : 'null');
+	console.log('userPageData:', userData?.userPageData ? Object.keys(userData.userPageData) : 'null');
+	
+	// 检查数据完整性
+	if (!userData || !userData.userPageData) {
+		throw new Error(`无法获取用户数据。返回的数据结构: ${JSON.stringify(userData ? Object.keys(userData) : null)}`);
+	}
+	
+	const { userPageData, notes, collect } = userData;
+	const { basicInfo, interactions, tags } = userPageData;
+	
+	if (!basicInfo || !basicInfo.nickname) {
+		throw new Error('用户信息不完整，可能是该用户不存在或页面结构已变化');
+	}
 
 	const title = `${basicInfo.nickname} - ${category === 'notes' ? '笔记' : '收藏'} • 小红书 / RED`;
-	const tagsStr = tags.filter(t => t.name).map((t) => t.name).join(' ');
-	const interactStr = interactions.map((i) => `${i.count} ${i.name}`).join(' ');
-	const description = `${basicInfo.desc} ${tagsStr} ${interactStr}`.trim();
+	const tagsStr = tags && tags.length > 0 ? tags.filter(t => t.name).map((t) => t.name).join(' ') : '';
+	const interactStr = interactions && interactions.length > 0 ? interactions.map((i) => `${i.count} ${i.name}`).join(' ') : '';
+	const description = `${basicInfo.desc || ''} ${tagsStr} ${interactStr}`.trim();
 	const image = basicInfo.imageb || basicInfo.images;
 
 	const renderNote = (notes) =>
